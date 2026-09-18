@@ -2078,8 +2078,10 @@
                                                     class="absolute inset-0 h-full w-full object-contain"
                                                     alt="">
                                                 <video :src="getMediaUrl(msg)"
-                                                    class="relative h-full w-full object-contain"
+                                                    class="relative z-10 h-full w-full object-contain"
                                                     preload="auto" autoplay loop muted playsinline
+                                                    @canplay="$event.target.play().catch(() => {})"
+                                                    @ended="$event.target.currentTime = 0; $event.target.play().catch(() => {})"
                                                     @error="handleMediaError($event, msg)"></video>
                                             </div>
                                             <div v-else-if="isLottieSticker(msg) && !lottieStickerFailed(msg)"
