@@ -15,6 +15,9 @@ import platform
 import re
 import secrets
 import shlex
+import shutil
+import subprocess
+import tempfile
 import time
 import traceback
 from collections.abc import AsyncGenerator, Iterable
@@ -1405,6 +1408,17 @@ _media_root = Path(config.media_path).resolve() if os.path.exists(config.media_p
 
 # Thumbnail cache lives outside media root so it works with read-only media volumes
 _thumb_cache_dir: Path | None = None
+_animated_sticker_cache_dir: Path | None = None
+_animated_sticker_locks: dict[str, asyncio.Lock] = {}
+
+
+def _animated_sticker_lock(cache_key: str) -> asyncio.Lock:
+    """Return the per-output lock used to collapse concurrent transcodes."""
+    lock = _animated_sticker_locks.get(cache_key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _animated_sticker_locks[cache_key] = lock
+    return lock
 
 
 def _checked_media_path(path: str) -> str:
@@ -1568,6 +1582,83 @@ def _resolve_media_file(relative_path: str):
     if not resolved.is_file():
         return None
     return resolved
+
+
+def _transcode_sticker_to_mp4_sync(source: Path, dest: Path) -> bool:
+    """Create an MP4 animated fallback for a sticker source file.
+
+    Uses ffmpeg when available and writes atomically so no requester can read a
+    half-written file.
+    """
+    if shutil.which("ffmpeg") is None:
+        return False
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=".sticker-", suffix=".mp4")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(source),
+                "-an",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:v",
+                "libx264",
+                "-profile:v",
+                "baseline",
+                "-level",
+                "3.0",
+                "-movflags",
+                "+faststart",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "28",
+                str(tmp_path),
+            ],
+            capture_output=True,
+            timeout=20,
+        )
+        if result.returncode != 0 or not tmp_path.exists() or tmp_path.stat().st_size <= 0:
+            return False
+        os.replace(tmp_path, dest)
+        return True
+    except Exception:
+        return False
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+async def _ensure_animated_sticker_fallback(source: Path, relative_path: str) -> Path | None:
+    """Return an MP4 fallback path for one sticker source, generating on demand."""
+    from .thumbnails import resolve_cache_dir
+
+    global _animated_sticker_cache_dir
+    if _animated_sticker_cache_dir is None:
+        _animated_sticker_cache_dir = resolve_cache_dir(_media_root) / "animated-stickers"
+        _animated_sticker_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    rel = Path(relative_path)
+    stem = rel.stem or "sticker"
+    out_dir = _animated_sticker_cache_dir / rel.parent
+    out_path = out_dir / f"{stem}.mp4"
+
+    if out_path.exists() and out_path.stat().st_mtime >= source.stat().st_mtime:
+        return out_path
+
+    lock = _animated_sticker_lock(str(out_path))
+    async with lock:
+        if out_path.exists() and out_path.stat().st_mtime >= source.stat().st_mtime:
+            return out_path
+        ok = await asyncio.to_thread(_transcode_sticker_to_mp4_sync, source, out_path)
+        if not ok:
+            return None
+        return out_path
 
 
 async def _entitled_media_row(chat: ChatContext, media_key: str) -> dict:
@@ -1770,6 +1861,38 @@ async def serve_media(
     # store it — never a proxy that skips the entitlement.
     response.headers["Cache-Control"] = "private"
     return response
+
+
+@app.get("/media/sticker-animated/{chat_ref}/{media_key}")
+async def serve_animated_sticker(
+    media_key: str,
+    chat: ChatContext = Depends(require_chat),
+    user: UserContext = Depends(require_auth),
+):
+    """Serve an animated sticker fallback as MP4 for undecodable sticker media."""
+    if not _media_root:
+        raise HTTPException(status_code=404, detail="Media directory not configured")
+
+    if user.no_download:
+        raise HTTPException(status_code=403, detail="Downloads disabled for this account")
+
+    parsed = _parse_media_key(media_key)
+    if parsed is None or parsed[1] != "sticker":
+        raise HTTPException(status_code=404, detail="File not found")
+
+    row = await _entitled_media_row(chat, media_key)
+    relative = _media_relative_path(row.get("file_path"))
+    if relative is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    resolved = _resolve_media_file(relative)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    fallback = await _ensure_animated_sticker_fallback(resolved, relative)
+    if fallback is None:
+        raise HTTPException(status_code=404, detail="Animated sticker fallback unavailable")
+
+    return FileResponse(fallback, media_type="video/mp4", headers={"Cache-Control": "private, max-age=86400"})
 
 
 # ---- Info panel "Open" buttons: operator-configured commands (native runs) ----
@@ -2552,22 +2675,6 @@ def _attach_message_payload_urls(messages: list, chat: ChatContext) -> None:
             media["url"] = f"/media/{chat.ref}/{_encode_media_key(media_key)}"
         else:
             media["url"] = None
-        # Poster frame for the bubble's <video>: without it the browser shows
-        # nothing until playback starts (no built-in "first frame" preview for
-        # preload="metadata"), so a video message renders as a blank rectangle
-        # with just the play button. Reuses the same on-demand thumbnail route
-        # the media gallery already serves from (ffmpeg-generated, cached).
-        if (
-            media.get("type") in ("video", "video_note", "sticker")
-            and media["url"]
-            and (
-                media.get("type") != "sticker"
-                or media.get("mime_type") == "video/webm"
-            )
-        ):
-            media["thumb_url"] = f"/media/thumb/400/{chat.ref}/{_encode_media_key(media_key)}"
-        else:
-            media["thumb_url"] = None
 
 
 @app.get("/api/chats")

@@ -2018,9 +2018,13 @@
                                                         d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                                                 </svg>
                                                 <span>Media not found</span>
+                                                <button @click.stop="retryMediaLoad(msg)"
+                                                    class="ml-2 text-xs text-tg-accent-soft hover:text-tg-accent-bright underline">
+                                                    Retry
+                                                </button>
                                             </div>
                                             <video v-else
-                                                :data-src="getMediaUrl(msg)" :poster="msg.media?.thumb_url"
+                                                :data-src="getMediaUrl(msg)"
                                                 class="round-video gif-video cursor-pointer"
                                                 loop muted playsinline
                                                 tabindex="0" role="button"
@@ -2029,6 +2033,7 @@
                                                 @click="toggleRoundVideoSound($event)"
                                                 @keydown.enter.prevent="toggleRoundVideoSound($event)"
                                                 @keydown.space.prevent="toggleRoundVideoSound($event)"
+                                                @loadeddata="handleMediaLoaded(msg)"
                                                 @error="handleMediaError($event, msg)">
                                             </video>
                                         </div>
@@ -2048,12 +2053,17 @@
                                                         d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                                                 </svg>
                                                 <span>Media not found</span>
+                                                <button @click.stop="retryMediaLoad(msg)"
+                                                    class="ml-2 text-xs text-tg-accent-soft hover:text-tg-accent-bright underline">
+                                                    Retry
+                                                </button>
                                             </div>
                                             <template v-else>
-                                                <video preload="metadata" :poster="msg.media?.thumb_url"
+                                                <video preload="metadata"
+                                                    :src="getMediaUrl(msg)"
                                                     class="rounded-lg max-h-64 w-full pointer-events-none"
+                                                    @loadeddata="handleMediaLoaded(msg)"
                                                     @error="handleMediaError($event, msg)">
-                                                    <source :src="getMediaUrl(msg)" type="video/mp4">
                                                 </video>
                                                 <!-- Play overlay -->
                                                 <div class="absolute inset-0 flex items-center justify-center bg-black/20 group-hover:bg-black/40 transition rounded-lg">
@@ -2072,22 +2082,35 @@
                                                 :src="getMediaUrl(msg)" loading="lazy"
                                                 class="max-h-48 max-w-full object-contain"
                                                 @error="handleImageError($event, msg)">
-                                            <div v-else-if="isVideoSticker(msg)"
-                                                class="relative h-48 w-48 max-w-full">
-                                                <img :src="msg.media?.thumb_url"
-                                                    class="absolute inset-0 h-full w-full object-contain"
-                                                    alt="">
-                                                <video :src="getMediaUrl(msg)"
-                                                    class="relative z-10 h-full w-full object-contain"
-                                                    preload="auto" autoplay loop muted playsinline
-                                                    @canplay="$event.target.play().catch(() => {})"
-                                                    @ended="$event.target.currentTime = 0; $event.target.play().catch(() => {})"
-                                                    @error="handleMediaError($event, msg)"></video>
+                                            <div v-else-if="isVideoSticker(msg) && msg.mediaLoadFailed"
+                                                class="flex flex-col items-start gap-2 text-xs text-tg-muted p-2 bg-black/20 rounded">
+                                                <img :src="getStickerPreviewUrl(msg)"
+                                                    loading="lazy"
+                                                    class="max-h-48 max-w-full object-contain rounded"
+                                                    @error="handleImageError($event, msg)">
+                                                <button @click.stop="retryMediaLoad(msg)"
+                                                    class="text-xs text-tg-accent-soft hover:text-tg-accent-bright underline">
+                                                    Retry sticker
+                                                </button>
                                             </div>
+                                            <video v-else-if="isVideoSticker(msg)"
+                                                :src="getAnimatedStickerFallbackUrl(msg)"
+                                                class="max-h-48 max-w-full object-contain"
+                                                autoplay loop muted playsinline
+                                                @loadeddata="handleMediaLoaded(msg)"
+                                                @error="handleStickerVideoError($event, msg)"></video>
                                             <div v-else-if="isLottieSticker(msg) && !lottieStickerFailed(msg)"
                                                 class="w-40 h-40"
                                                 @vue:mounted="onLottieStickerMounted($event.el, msg)"
                                                 @vue:unmounted="onLottieStickerUnmounted(msg)"></div>
+                                            <div v-else-if="isLottieSticker(msg) && lottieStickerFailed(msg)"
+                                                class="text-xs text-tg-muted p-2 bg-black/20 rounded flex items-center gap-2">
+                                                <span>Sticker animation unavailable</span>
+                                                <button @click.stop="retryLottieSticker(msg)"
+                                                    class="text-xs text-tg-accent-soft hover:text-tg-accent-bright underline">
+                                                    Retry
+                                                </button>
+                                            </div>
                                             <div v-else class="text-xs text-tg-muted p-2 bg-black/20 rounded">
                                                 🎭 Sticker
                                             </div>
@@ -7976,19 +7999,99 @@
                     return byExtension || byMime
                 }
 
+                const stickerFileName = (msg) => getDocumentDisplayName(msg).toLowerCase()
+                const stickerMime = (msg) => (msg.media?.mime_type || '').toLowerCase()
+
                 // ---- Sticker rendering ----
                 // Telegram ships stickers in three shapes: static WebP (plain
                 // image), video stickers (WebM, real video), and the default
                 // Lottie/.tgs ones — a gzipped JSON animation with no native
                 // browser decoder. Those three checks pick the branch the
                 // template renders; failures fall back to a plain label.
-                const stickerMime = (msg) => (msg.media?.mime_type || '').toLowerCase()
-                const isStaticSticker = (msg) => getDocumentDisplayName(msg).toLowerCase().endsWith('.webp')
-                    || stickerMime(msg) === 'image/webp'
-                const isVideoSticker = (msg) => getDocumentDisplayName(msg).toLowerCase().endsWith('.webm')
-                    || stickerMime(msg) === 'video/webm'
-                const isLottieSticker = (msg) => getDocumentDisplayName(msg).toLowerCase().endsWith('.tgs')
-                    || stickerMime(msg) === 'application/x-tgsticker'
+                const isStaticSticker = (msg) => stickerFileName(msg).endsWith('.webp') || stickerMime(msg) === 'image/webp'
+                const isVideoSticker = (msg) => stickerFileName(msg).endsWith('.webm') || stickerMime(msg).startsWith('video/')
+                const isLottieSticker = (msg) => stickerFileName(msg).endsWith('.tgs') || stickerMime(msg).includes('tgsticker')
+
+                const MAX_MEDIA_RETRIES = 2
+                const mediaRetryState = new Map() // messageIdKey -> retry attempts
+                const mediaRetryTimers = new Map() // messageIdKey -> timeout id
+                const mediaRetryKey = (msg) => messageIdKey(msg)
+
+                const bumpMediaRetry = (msg) => {
+                    const key = mediaRetryKey(msg)
+                    const next = (mediaRetryState.get(key) || 0) + 1
+                    mediaRetryState.set(key, next)
+                    return next
+                }
+
+                const clearMediaRetry = (msg) => {
+                    const key = mediaRetryKey(msg)
+                    mediaRetryState.delete(key)
+                    const timerId = mediaRetryTimers.get(key)
+                    if (timerId) {
+                        window.clearTimeout(timerId)
+                        mediaRetryTimers.delete(key)
+                    }
+                }
+
+                const withRetryParam = (url) => {
+                    if (!url) return ''
+                    const sep = url.includes('?') ? '&' : '?'
+                    return `${url}${sep}_retry=${Date.now()}`
+                }
+
+                const retryMediaElementLoad = (mediaEl, msg, url) => {
+                    const attempt = bumpMediaRetry(msg)
+                    if (attempt > MAX_MEDIA_RETRIES || !url) {
+                        return false
+                    }
+                    const delayMs = attempt * 300
+                    const key = mediaRetryKey(msg)
+                    const previousTimer = mediaRetryTimers.get(key)
+                    if (previousTimer) {
+                        window.clearTimeout(previousTimer)
+                    }
+                    const timerId = window.setTimeout(() => {
+                        mediaRetryTimers.delete(key)
+                        if (!mediaEl?.isConnected) return
+                        mediaEl.src = withRetryParam(url)
+                        if (typeof mediaEl.load === 'function') mediaEl.load()
+                    }, delayMs)
+                    mediaRetryTimers.set(key, timerId)
+                    return true
+                }
+
+                const handleMediaLoaded = (msg) => {
+                    msg.mediaLoadFailed = false
+                    clearMediaRetry(msg)
+                }
+
+                const retryMediaLoad = (msg) => {
+                    msg.mediaLoadFailed = false
+                    clearMediaRetry(msg)
+                }
+
+                const getStickerPreviewUrl = (msg) => {
+                    const mediaUrl = getMediaUrl(msg)
+                    if (!mediaUrl || !selectedChat.value?.ref || !msg?.media?.id) {
+                        return mediaUrl || ''
+                    }
+                    return `/media/thumb/256/${selectedChat.value.ref}/${encodeURIComponent(msg.media.id)}`
+                }
+
+                const getAnimatedStickerFallbackUrl = (msg) => {
+                    if (!selectedChat.value?.ref || !msg?.media?.id) {
+                        return ''
+                    }
+                    return `/media/sticker-animated/${selectedChat.value.ref}/${encodeURIComponent(msg.media.id)}`
+                }
+
+                const retryLottieSticker = (msg) => {
+                    const key = messageIdKey(msg)
+                    failedLottieStickers.value = new Set(
+                        [...failedLottieStickers.value].filter(item => item !== key)
+                    )
+                }
 
                 // messageIdKey, not msg.id: album/topic views can repeat a
                 // bare id across chats, and this key also has to match
@@ -8011,8 +8114,22 @@
                         return
                     }
                     try {
-                        const res = await fetch(getMediaUrl(msg), { credentials: 'same-origin' })
-                        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+                        const mediaUrl = getMediaUrl(msg)
+                        if (!mediaUrl) throw new Error('Missing media URL')
+                        let res = null
+                        let lastError = null
+                        for (let attempt = 0; attempt <= MAX_MEDIA_RETRIES; attempt++) {
+                            try {
+                                res = await fetch(withRetryParam(mediaUrl), { credentials: 'same-origin' })
+                                if (!res.ok) throw new Error(`HTTP ${res.status}`)
+                                break
+                            } catch (err) {
+                                lastError = err
+                                if (attempt >= MAX_MEDIA_RETRIES) break
+                                await new Promise(resolve => window.setTimeout(resolve, (attempt + 1) * 250))
+                            }
+                        }
+                        if (!res) throw lastError || new Error('Failed to fetch sticker')
                         const decompressed = res.body.pipeThrough(new DecompressionStream('gzip'))
                         const animationData = JSON.parse(await new Response(decompressed).text())
                         // The await above can outlive the bubble (fast scroll, chat switch):
@@ -8065,10 +8182,25 @@
                     // Same rule as handleImageError: the media URL carries the message id,
                     // so log the event only.
                     console.error('Failed to load media')
+                    const mediaEl = event?.target
+                    const url = getMediaUrl(msg)
+                    if (mediaEl && retryMediaElementLoad(mediaEl, msg, url)) {
+                        return
+                    }
                     // Flag the row and let the template swap in the placeholder. Writing
                     // the placeholder in with innerHTML destroyed the <video>, its <source>
                     // and the play overlay that Vue still held vnode.el pointers to, so the
                     // bubble stayed detached from the render tree for the rest of its life.
+                    msg.mediaLoadFailed = true
+                }
+
+                const handleStickerVideoError = (event, msg) => {
+                    console.error('Failed to load sticker animation')
+                    const mediaEl = event?.target
+                    const url = getAnimatedStickerFallbackUrl(msg)
+                    if (mediaEl && retryMediaElementLoad(mediaEl, msg, url)) {
+                        return
+                    }
                     msg.mediaLoadFailed = true
                 }
 
@@ -9873,6 +10005,12 @@
                     lottieStickerFailed,
                     onLottieStickerMounted,
                     onLottieStickerUnmounted,
+                    retryLottieSticker,
+                    handleMediaLoaded,
+                    retryMediaLoad,
+                    getStickerPreviewUrl,
+                    getAnimatedStickerFallbackUrl,
+                    handleStickerVideoError,
                     handleImageError,
                     handleMediaError,
                     openMedia,

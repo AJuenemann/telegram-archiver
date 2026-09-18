@@ -609,48 +609,32 @@ def classify_media_type(media: object) -> str | None:
         if attributes is None:
             return None
         is_animated = False
-        video_attr = None
-        audio_attr = None
-        has_sticker = False
         for attr in attributes:
             attr_type = type(attr).__name__
             if "Animated" in attr_type:
                 is_animated = True
-            if "Sticker" in attr_type:
-                has_sticker = True
-            elif "Video" in attr_type and video_attr is None:
-                video_attr = attr
-            elif "Audio" in attr_type and audio_attr is None:
-                audio_attr = attr
-        # Sticker wins over Video/Audio: Telegram's "video sticker" packs (webm,
-        # animated) carry a DocumentAttributeVideo alongside the Sticker one for
-        # playback, and whichever attribute Telegram lists first used to decide
-        # the type here -- silently rendering them as plain videos (manual play,
-        # no autoplay/loop) instead of the sticker experience every official
-        # client gives them. The Sticker attribute is authoritative: its
-        # presence means "this is a sticker" regardless of what else tags along.
-        if has_sticker:
-            return "sticker"
-        if video_attr is not None:
-            # A round message is the circular "video note" every official
-            # client renders as a circle. It is a Video attribute like any
-            # other, distinguished only by this flag -- the same shape as the
-            # voice/audio split one branch below.
-            # ``is True``, not truthiness: Telethon's parser sets a real bool
-            # (``_round_message = bool(flags & 1)``), while a bare MagicMock
-            # answers truthy to every getattr -- so a test fixture that never
-            # mentions the flag would silently become a round video. Same
-            # reasoning, and the same wording, as the strict check at
-            # telegram_backup.py's config gate.
-            if getattr(video_attr, "round_message", False) is True:
-                return "video_note"
-            # If animated, it's a GIF
-            return "animation" if is_animated else "video"
-        if audio_attr is not None:
-            # Voice notes have .voice=True on DocumentAttributeAudio
-            if getattr(audio_attr, "voice", False):
-                return "voice"
-            return "audio"
+            if "Video" in attr_type:
+                # A round message is the circular "video note" every official
+                # client renders as a circle. It is a Video attribute like any
+                # other, distinguished only by this flag -- the same shape as the
+                # voice/audio split one branch below.
+                # ``is True``, not truthiness: Telethon's parser sets a real bool
+                # (``_round_message = bool(flags & 1)``), while a bare MagicMock
+                # answers truthy to every getattr -- so a test fixture that never
+                # mentions the flag would silently become a round video. Same
+                # reasoning, and the same wording, as the strict check at
+                # telegram_backup.py's config gate.
+                if getattr(attr, "round_message", False) is True:
+                    return "video_note"
+                # If animated, it's a GIF
+                return "animation" if is_animated else "video"
+            elif "Audio" in attr_type:
+                # Voice notes have .voice=True on DocumentAttributeAudio
+                if getattr(attr, "voice", False):
+                    return "voice"
+                return "audio"
+            elif "Sticker" in attr_type:
+                return "sticker"
         # If animated but no video attribute, still an animation
         if is_animated:
             return "animation"
