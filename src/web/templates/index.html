@@ -2072,12 +2072,16 @@
                                                 :src="getMediaUrl(msg)" loading="lazy"
                                                 class="max-h-48 max-w-full object-contain"
                                                 @error="handleImageError($event, msg)">
-                                            <video v-else-if="isVideoSticker(msg)"
-                                                :src="getMediaUrl(msg)"
-                                                class="h-48 w-48 max-w-full object-contain"
-                                                preload="auto"
-                                                autoplay loop muted playsinline
-                                                @error="handleMediaError($event, msg)"></video>
+                                            <div v-else-if="isVideoSticker(msg)"
+                                                class="relative h-48 w-48 max-w-full">
+                                                <img :src="msg.media?.thumb_url"
+                                                    class="absolute inset-0 h-full w-full object-contain"
+                                                    alt="">
+                                                <video :src="getMediaUrl(msg)"
+                                                    class="relative h-full w-full object-contain"
+                                                    preload="auto" autoplay loop muted playsinline
+                                                    @error="handleMediaError($event, msg)"></video>
+                                            </div>
                                             <div v-else-if="isLottieSticker(msg) && !lottieStickerFailed(msg)"
                                                 class="w-40 h-40"
                                                 @vue:mounted="onLottieStickerMounted($event.el, msg)"
@@ -7976,9 +7980,13 @@
                 // Lottie/.tgs ones — a gzipped JSON animation with no native
                 // browser decoder. Those three checks pick the branch the
                 // template renders; failures fall back to a plain label.
+                const stickerMime = (msg) => (msg.media?.mime_type || '').toLowerCase()
                 const isStaticSticker = (msg) => getDocumentDisplayName(msg).toLowerCase().endsWith('.webp')
+                    || stickerMime(msg) === 'image/webp'
                 const isVideoSticker = (msg) => getDocumentDisplayName(msg).toLowerCase().endsWith('.webm')
+                    || stickerMime(msg) === 'video/webm'
                 const isLottieSticker = (msg) => getDocumentDisplayName(msg).toLowerCase().endsWith('.tgs')
+                    || stickerMime(msg) === 'application/x-tgsticker'
 
                 // messageIdKey, not msg.id: album/topic views can repeat a
                 // bare id across chats, and this key also has to match

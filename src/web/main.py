@@ -2557,7 +2557,14 @@ def _attach_message_payload_urls(messages: list, chat: ChatContext) -> None:
         # preload="metadata"), so a video message renders as a blank rectangle
         # with just the play button. Reuses the same on-demand thumbnail route
         # the media gallery already serves from (ffmpeg-generated, cached).
-        if media.get("type") in ("video", "video_note") and media["url"]:
+        if (
+            media.get("type") in ("video", "video_note", "sticker")
+            and media["url"]
+            and (
+                media.get("type") != "sticker"
+                or media.get("mime_type") == "video/webm"
+            )
+        ):
             media["thumb_url"] = f"/media/thumb/400/{chat.ref}/{_encode_media_key(media_key)}"
         else:
             media["thumb_url"] = None
