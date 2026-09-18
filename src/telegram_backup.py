@@ -641,6 +641,10 @@ def _failed_media_row(media_id: str, media_type: str, message_id: int, chat_id: 
     }
 
 
+# Floor between progress-heartbeat writes (see TelegramBackup._touch_progress_heartbeat).
+_HEARTBEAT_MIN_INTERVAL_SECONDS = 2.0
+
+
 class TelegramBackup:
     """Main class for managing Telegram backups."""
 
@@ -694,6 +698,13 @@ class TelegramBackup:
         # (#228). Loaded from the metadata KV at the start of each backup_all run
         # when FOLLOW_CHAT_MIGRATIONS is on; merged into the effective sweep scope.
         self._followed_migration_ids: set[int] = set()
+        # Progress heartbeat (issue: "backup looks stuck" during one large chat).
+        # backup_progress_current/total only move between dialogs, so a single
+        # media-heavy chat can sit at the same count for minutes with nothing to
+        # show it's alive. This is a THROTTLED last-activity signal instead —
+        # written at most every _HEARTBEAT_MIN_INTERVAL_SECONDS regardless of how
+        # often callers ask for one, so it costs nothing extra on the fast path.
+        self._last_heartbeat_write = 0.0
 
         logger.info("TelegramBackup initialized")
 
@@ -709,6 +720,25 @@ class TelegramBackup:
         This ensures IDs match what users see in Telegram and configure in env vars.
         """
         return get_peer_id(entity)
+
+    async def _touch_progress_heartbeat(self, activity: str) -> None:
+        """Record that the backup is still doing *something*, throttled.
+
+        Advisory only, for the viewer's status strip — never lets a write
+        failure or the throttle itself interrupt the actual backup. Called
+        both between messages and from inside a single media download's
+        progress_callback, so a chat with one huge video still shows life
+        instead of sitting on the same dialog counter with no signal at all.
+        """
+        now = time.monotonic()
+        if now - self._last_heartbeat_write < _HEARTBEAT_MIN_INTERVAL_SECONDS:
+            return
+        self._last_heartbeat_write = now
+        try:
+            await self.db.set_metadata("backup_progress_heartbeat", utcnow_naive().isoformat() + "Z")
+            await self.db.set_metadata("backup_progress_activity", activity)
+        except Exception as e:
+            logger.debug("Progress heartbeat write skipped: %s", type(e).__name__)
 
     async def _load_followed_migrations(self) -> None:
         """Load adopted-supergroup ids from the metadata KV (#228).
@@ -1074,6 +1104,13 @@ class TelegramBackup:
             # indicator and treat partial stats as expected (issue #200). Cleared
             # in the finally block below, even if the backup raises.
             await self.db.set_metadata("backup_in_progress", "1")
+            # Dialog counters for the viewer's progress bar. Reset here so a
+            # stale total from the previous run never lingers into this one;
+            # both are cleared again in the finally block below.
+            await self.db.set_metadata("backup_progress_current", "0")
+            await self.db.set_metadata("backup_progress_total", "0")
+            await self.db.set_metadata("backup_progress_heartbeat", "")
+            await self.db.set_metadata("backup_progress_activity", "")
 
             # Reset the reaction re-sweep pacing state and load the cycle cursor
             # (which chats already completed after a deferred run — #224).
@@ -1471,6 +1508,7 @@ class TelegramBackup:
             # archived, even if Telegram's API also returns it in folder=1.
             total_messages = 0
             backed_up_chat_ids = set()
+            await self.db.set_metadata("backup_progress_total", str(len(filtered_dialogs)))
             for i, dialog in enumerate(filtered_dialogs, 1):
                 entity = dialog.entity
                 chat_id = self._get_marked_id(entity)
@@ -1486,6 +1524,7 @@ class TelegramBackup:
                     f"[{i}/{len(filtered_dialogs)}] Backing up"
                     f"{' (archived)' if is_archived else ''}{chat_title_for_log(entity, self.config)}"
                 )
+                await self.db.set_metadata("backup_progress_current", str(i))
 
                 try:
                     message_count = await self._backup_dialog(dialog, is_archived=is_archived)
@@ -1524,10 +1563,17 @@ class TelegramBackup:
 
             if archived_to_backup:
                 logger.info(f"Backing up {len(archived_to_backup)} additional archived dialogs...")
+                # Continue the same counter rather than restarting it, so the
+                # viewer's progress bar doesn't jump backwards for this phase.
+                progress_base = len(filtered_dialogs)
+                await self.db.set_metadata(
+                    "backup_progress_total", str(progress_base + len(archived_to_backup))
+                )
                 for i, dialog in enumerate(archived_to_backup, 1):
                     entity = dialog.entity
                     chat_id = self._get_marked_id(entity)
                     logger.info(f"  [Archived {i}/{len(archived_to_backup)}]{chat_title_for_log(entity, self.config)}")
+                    await self.db.set_metadata("backup_progress_current", str(progress_base + i))
 
                     try:
                         message_count = await self._backup_dialog(dialog, is_archived=True)
@@ -1608,6 +1654,10 @@ class TelegramBackup:
             # doesn't show a stuck "backing up" indicator after a crash (#200).
             try:
                 await self.db.set_metadata("backup_in_progress", "0")
+                await self.db.set_metadata("backup_progress_current", "0")
+                await self.db.set_metadata("backup_progress_total", "0")
+                await self.db.set_metadata("backup_progress_heartbeat", "")
+                await self.db.set_metadata("backup_progress_activity", "")
             except Exception as e:
                 logger.warning(f"Failed to clear backup_in_progress flag: {e}")
 
@@ -2234,6 +2284,12 @@ class TelegramBackup:
         failures: dict | None = None
 
         async for message in iter_messages_with_flood_retry(self.client, entity, min_id=last_message_id, reverse=True):
+            # Throttled inside — safe to call on every message without
+            # flooding the DB. Proves the run is alive between dialog-level
+            # progress writes, which don't move again until this whole
+            # chat finishes.
+            await self._touch_progress_heartbeat(f"{grand_total + len(batch_data)} Nachrichten verarbeitet")
+
             # Skip messages belonging to excluded forum topics
             if self.config.should_skip_topic(chat_id, extract_topic_id(message)):
                 if not cursor_frozen:
@@ -4026,6 +4082,17 @@ class TelegramBackup:
         current offset; larger floods still propagate.
         """
         async with absorb_media_floods(self.client, getattr(self.config, "media_flood_sleep_threshold", 0)):
+
+            async def _report_download_progress(current: int, total: int) -> None:
+                # Called often (once per chunk, from either download path); the
+                # heartbeat's own throttle keeps that from turning into a write
+                # storm. This is the one place a SINGLE large file's progress is
+                # visible at all — otherwise a multi-minute transfer sits behind
+                # one unfinished await with no signal the run is still alive.
+                mb_current = current / (1024 * 1024)
+                mb_total = total / (1024 * 1024) if total else 0
+                await self._touch_progress_heartbeat(f"Lade Mediendatei ({mb_current:.1f}/{mb_total:.1f} MB)")
+
             if self._should_parallelize(message, file_size):
                 if self._parallel_downloader is None:
                     self._parallel_downloader = ParallelDownloader(
@@ -4035,12 +4102,15 @@ class TelegramBackup:
                         max_file_size=self.config.get_max_media_size_bytes(),
                     )
                 try:
-                    return await self._parallel_downloader.download_media(message, tmp_path)
+                    return await self._parallel_downloader.download_media(
+                        message, tmp_path, progress_callback=_report_download_progress
+                    )
                 except ParallelDownloadUnavailable as exc:
                     logger.info(
                         "Parallel download not applicable (%s); falling back to single-stream", describe_exception(exc)
                     )
-            return await self.client.download_media(message, tmp_path)
+
+            return await self.client.download_media(message, tmp_path, progress_callback=_report_download_progress)
 
     def _get_media_size(self, media) -> int:
         """Get estimated size of media object in bytes."""

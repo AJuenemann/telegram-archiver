@@ -11,6 +11,10 @@ https://cdnjs.cloudflare.com/ajax/libs/moment-timezone/0.5.43/moment-timezone-wi
 https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css -> 1edb1725a9ea8ca4dcf2f5508cee183218aa1685e47c1b23056717f754f58ebf  fontawesome/css/all.min.css
 https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css -> 1b34a42552c96f10e4dfaaa4a367276b03868aacff63c1ac42ffe331352bc754  flatpickr-4.6.13.min.css
 https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js -> 1eeab1cb779471a0b0aaa93dd91c2eb1aa537d696f01ab05ea9dabc55e8525a1  flatpickr-4.6.13.min.js
+https://cdn.jsdelivr.net/npm/lottie-web@5.12.2/build/player/lottie_light.min.js -> 23cd2c01be3d4da8bb664645d03afaff40879c62dc5f8dfe075ab3aa35c108f3  lottie-light-5.12.2.min.js
+# lottie-web is licensed under the MIT license (Airbnb). The "light" build
+# renders pre-parsed Lottie/.tgs JSON to SVG only — no expressions/effects —
+# which is all animated sticker playback needs.
 https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap -> 41d20bdccd3bfbd1935066f356c4cef22e3fd05a8f6b33f0dfad07121dad4f42  inter.css (URLs rewritten to /static/vendor/fonts/)
 https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/webfonts/fa-brands-400.ttf -> 20c4a58bc9d1d69e935d06f1528923646a715be5e218665655cade8f5f1b8c00  fontawesome/webfonts/fa-brands-400.ttf
 https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/webfonts/fa-brands-400.woff2 -> 748332090c4b8e20f95d0ff59f0be20fa9c889359d3b36d4b886d73376054207  fontawesome/webfonts/fa-brands-400.woff2

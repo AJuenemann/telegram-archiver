@@ -155,12 +155,16 @@ class ParallelDownloader:
         # per FILE was the dominant spend of the caller's flood budget.
         self._dc_auth_keys: dict = {}
 
-    async def download_media(self, message, file) -> str:
+    async def download_media(self, message, file, progress_callback=None) -> str:
         """Download ``message``'s media to path ``file`` and return ``file``.
 
         Mirrors the subset of ``TelegramClient.download_media`` the backup seam
         relies on (message in, destination path in, path out), so it is a
-        drop-in replacement under ``call_with_flood_retry``.
+        drop-in replacement under ``call_with_flood_retry``. ``progress_callback``,
+        if given, is awaited as ``callback(bytes_done, file_size)`` after each
+        chunk lands — the only way a caller sees progress while several senders
+        are mid-transfer, since nothing else here returns until the whole file
+        is done.
         """
         if not isinstance(file, str):
             raise ParallelDownloadUnavailable("parallel download requires a destination path")
@@ -181,10 +185,12 @@ class ParallelDownloader:
         if self._max_file_size is not None and file_size > self._max_file_size:
             raise ParallelDownloadUnavailable(f"declared file size {file_size} exceeds ceiling {self._max_file_size}")
 
-        await self._download_location(location, dc_id, file_size, file)
+        await self._download_location(location, dc_id, file_size, file, progress_callback)
         return file
 
-    async def _download_location(self, location, dc_id, file_size: int, dest_path: str) -> None:
+    async def _download_location(
+        self, location, dc_id, file_size: int, dest_path: str, progress_callback=None
+    ) -> None:
         offsets = list(range(0, file_size, self._part_size))
         queue: asyncio.Queue[int] = asyncio.Queue()
         for off in offsets:
@@ -202,7 +208,8 @@ class ParallelDownloader:
             senders = await self._build_senders(dc_id, n)
 
             workers = [
-                asyncio.create_task(self._worker(sender, location, file_size, queue, fd, written)) for sender in senders
+                asyncio.create_task(self._worker(sender, location, file_size, queue, fd, written, progress_callback))
+                for sender in senders
             ]
             try:
                 await asyncio.gather(*workers)
@@ -233,7 +240,7 @@ class ParallelDownloader:
                 os.close(fd)
             await self._close_senders(senders)
 
-    async def _worker(self, sender, location, file_size, queue, fd, written) -> None:
+    async def _worker(self, sender, location, file_size, queue, fd, written, progress_callback=None) -> None:
         while True:
             try:
                 offset = queue.get_nowait()
@@ -272,6 +279,10 @@ class ParallelDownloader:
                 )
             _pwrite_all(fd, data, offset)
             written.append((offset, len(data)))
+            if progress_callback is not None:
+                # Cooperative scheduling only (no other task touches ``written``
+                # between awaits), so summing it here is safe without a lock.
+                await progress_callback(sum(length for _, length in written), file_size)
 
     async def _build_senders(self, dc_id, n: int) -> list[MTProtoSender]:
         """Create ``n`` connected senders to ``dc_id`` sharing one auth key.

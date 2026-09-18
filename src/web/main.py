@@ -3025,6 +3025,20 @@ async def get_stats(user: UserContext = Depends(require_auth)):
         backup_in_progress = await db.get_metadata("backup_in_progress")
         stats["backup_in_progress"] = backup_in_progress == "1"
 
+        # Dialog counters for the progress bar (0/0 when idle or not yet
+        # written this run — the frontend only renders them while
+        # backup_in_progress is true).
+        progress_current = await db.get_metadata("backup_progress_current")
+        progress_total = await db.get_metadata("backup_progress_total")
+        stats["backup_progress_current"] = int(progress_current) if progress_current else 0
+        stats["backup_progress_total"] = int(progress_total) if progress_total else 0
+
+        # Throttled last-activity signal (see TelegramBackup._touch_progress_heartbeat):
+        # proves the run is alive while stuck processing one large chat, where
+        # the counters above don't move for minutes at a time.
+        stats["backup_progress_heartbeat"] = await db.get_metadata("backup_progress_heartbeat") or None
+        stats["backup_progress_activity"] = await db.get_metadata("backup_progress_activity") or None
+
         # Notifications config
         stats["push_notifications"] = config.push_notifications  # off, basic, full
         stats["push_enabled"] = push_manager is not None and push_manager.is_enabled
@@ -3812,6 +3826,35 @@ async def admin_list_chats(user: UserContext = Depends(require_master)):
             }
         )
     return {"chats": result}
+
+
+@app.delete("/api/admin/chats/{chat_ref}")
+async def admin_delete_chat(chat_ref: str, request: Request, user: UserContext = Depends(require_master)):
+    """Permanently delete a chat: messages, media and reactions (master-only, irreversible).
+
+    A pure "remove from archive now" — nothing is remembered afterwards. If
+    the chat still exists on Telegram, the next backup finds it again and
+    re-imports it, same as any other chat currently in the account; the
+    operator's own EXCLUDE_CHAT_IDS env vars are still the way to keep a chat
+    out of the archive permanently.
+    """
+    chat = await _resolve_chat_ref(chat_ref, user)
+    try:
+        await db.delete_chat_and_related_data(chat.chat_id, config.media_path, account_id=chat.account_id)
+    except Exception as e:
+        logger.error(f"Error deleting chat: {type(e).__name__}")
+        if _is_db_connection_error(e):
+            raise HTTPException(status_code=503, detail="Database temporarily unavailable")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    await db.create_audit_log(
+        username=user.username,
+        role="master",
+        action=f"chat_deleted:{chat_ref}",
+        endpoint=f"/api/admin/chats/{chat_ref}",
+        ip_address=request.client.host if request.client else None,
+    )
+    return {"success": True}
 
 
 @app.get("/api/admin/audit")

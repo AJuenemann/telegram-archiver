@@ -1,5 +1,11 @@
 services:
   telegram-backup:
+    # Built from local source (Dockerfile) so backup-engine changes in this
+    # checkout (e.g. src/telegram_backup.py) take effect on the next
+    # `docker compose up --build`, instead of running the pinned image tag.
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: drumsergio/telegram-archive:8.11.1
     container_name: telegram-backup
     restart: unless-stopped
@@ -163,7 +169,7 @@ services:
 
     volumes:
       # Persistent data storage
-      - ./data:/data
+      - ${DATA_DIR:-./data}:/data
     networks:
       - telegram-network
     # Security hardening
@@ -189,6 +195,13 @@ services:
     #       memory: 512M
 
   telegram-viewer:
+    # Built from local source (Dockerfile.viewer) so template/UI changes in
+    # this checkout (e.g. src/web/templates/index.html) take effect on the
+    # next `docker compose up --build`, instead of silently running whatever
+    # was last published under the pinned image tag below.
+    build:
+      context: .
+      dockerfile: Dockerfile.viewer
     image: drumsergio/telegram-archive-viewer:8.11.1
     container_name: telegram-viewer
     restart: unless-stopped
@@ -204,7 +217,7 @@ services:
     ports:
       # Bind to localhost by default. Put this behind a reverse proxy with auth
       # configured before exposing it publicly.
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${VIEWER_PORT:-8000}:8000"
 
     # DELIBERATE ASYMMETRY with telegram-backup: no env_file here. This is the
     # internet-facing container, so it receives an explicit allowlist instead
@@ -272,7 +285,7 @@ services:
     volumes:
       # SQLite needs write access for WAL journal files (.db-wal, .db-shm).
       # Use :ro only if you are using PostgreSQL as the database backend.
-      - ./data:/data
+      - ${DATA_DIR:-./data}:/data
       # Wallpaper behind the messages (VIEWER_CHAT_BACKGROUND). The name must
       # match the variable, and the mount has to be re-stated after an image
       # update — nothing written inside the container survives one, and this

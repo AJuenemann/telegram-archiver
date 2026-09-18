@@ -10,12 +10,12 @@
     <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
     <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
     <link rel="manifest" href="/static/manifest.json">
-    <title>Telegram Archive</title>
-    <!-- Third-party assets are vendored under /static/vendor (exact versions,
-         origin URLs and hashes in VENDOR-MANIFEST.txt there). They run in the
-         same origin as the archive session, so they load from this server and
-         nowhere else: no CDN edge to compromise, no per-pageview IP/UA leak to
-         third parties, and the UI keeps working offline/air-gapped. -->
+        <title>Telegram Archive</title>
+        <!-- Third-party assets are vendored under /static/vendor (exact versions,
+            origin URLs and hashes in VENDOR-MANIFEST.txt there). They run in the
+            same origin as the archive session, so they load from this server and
+            nowhere else: no CDN edge to compromise, no per-pageview IP/UA leak to
+            third parties, and the UI keeps working offline/air-gapped. -->
     <script>
         // Apply the saved theme before any stylesheet resolves, so the first
         // paint is already themed (no flash of the default palette). Full
@@ -38,6 +38,9 @@
     <script src="/static/vendor/vue-3.5.41.global.prod.js"></script>
     <script src="/static/vendor/moment-2.29.4.min.js"></script>
     <script src="/static/vendor/moment-timezone-with-data-1970-2030-0.5.43.min.js"></script>
+    <!-- Renders animated (.tgs / Lottie) stickers; gunzip uses the native
+         DecompressionStream API, so no separate inflate library is vendored. -->
+    <script src="/static/vendor/lottie-light-5.12.2.min.js"></script>
     <link href="/static/vendor/inter.css" rel="stylesheet">
     <link rel="stylesheet" href="/static/vendor/fontawesome/css/all.min.css">
     <!-- Flatpickr for date picker -->
@@ -1065,26 +1068,20 @@
                         </button>
                     </div>
 
-                    <!-- Last Backup Time / Real-time Status -->
-                    <div class="text-xs text-tg-muted">
-                        <div class="flex items-center gap-1.5">
-                            <template v-if="listenerActive">
-                                <!-- Real-time mode indicator -->
-                                <span class="relative flex h-2 w-2">
-                                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-                                    <span class="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
-                                </span>
-                                <span class="text-green-400">Real-time sync</span>
-                                <span class="text-tg-n500">•</span>
-                                <span>Last backup: {{ formatLastBackupTime(lastBackupTime, viewerTimezone, lastBackupTimeSource) }}</span>
-                            </template>
-                            <template v-else>
-                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                        d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                                </svg>
-                                <span>Last backup: {{ formatLastBackupTime(lastBackupTime, viewerTimezone, lastBackupTimeSource) }}</span>
-                            </template>
+                    <!-- Archive status strip (backup/live-sync + last backup time) -->
+                    <div class="mb-3 rounded-lg border px-3 py-2"
+                        :class="archiveStatusClass">
+                        <div class="flex items-center justify-between gap-3">
+                            <div class="flex items-center gap-2">
+                                <span class="inline-flex h-2.5 w-2.5 rounded-full"
+                                    :class="archiveStatusDotClass"></span>
+                                <span class="text-sm font-medium">{{ archiveStatusLabel }}</span>
+                            </div>
+                            <span class="text-[11px] opacity-80">{{ archiveStatusHint }}</span>
+                        </div>
+                        <div v-if="archiveBackupProgressPercent !== null" class="mt-1.5 h-1.5 w-full rounded-full bg-black/25 overflow-hidden">
+                            <div class="h-full rounded-full bg-amber-400 transition-[width] duration-500"
+                                :style="{ width: archiveBackupProgressPercent + '%' }"></div>
                         </div>
                     </div>
                 </div>
@@ -2071,12 +2068,21 @@
 
                                         <!-- Stickers (static/animated) -->
                                         <div v-else-if="msg.media?.type === 'sticker'" class="max-w-[200px]">
-                                            <img v-if="getDocumentDisplayName(msg).endsWith('.webp')"
+                                            <img v-if="isStaticSticker(msg)"
                                                 :src="getMediaUrl(msg)" loading="lazy"
                                                 class="max-h-48 max-w-full object-contain"
                                                 @error="handleImageError($event, msg)">
+                                            <video v-else-if="isVideoSticker(msg)"
+                                                :src="getMediaUrl(msg)"
+                                                class="max-h-48 max-w-full object-contain"
+                                                autoplay loop muted playsinline
+                                                @error="handleMediaError($event, msg)"></video>
+                                            <div v-else-if="isLottieSticker(msg) && !lottieStickerFailed(msg)"
+                                                class="w-40 h-40"
+                                                @vue:mounted="onLottieStickerMounted($event.el, msg)"
+                                                @vue:unmounted="onLottieStickerUnmounted(msg)"></div>
                                             <div v-else class="text-xs text-tg-muted p-2 bg-black/20 rounded">
-                                                🎭 Animated Sticker
+                                                🎭 Sticker
                                             </div>
                                         </div>
 
@@ -2293,6 +2299,16 @@
                             <dd class="mt-1 font-mono text-tg-ink">{{ selectedChat.id }}</dd>
                         </div>
                     </dl>
+
+                    <!-- Danger zone: irreversible, master-only. Removes the chat
+                         now; if it still exists on Telegram, the next backup
+                         re-imports it like any other chat in the account. -->
+                    <section v-if="userRole === 'master'" class="px-4 py-3 border-b border-tg-n700">
+                        <button type="button" @click="openDeleteChatConfirm(selectedChat)"
+                            class="w-full px-3 py-2 text-sm text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition">
+                            <i class="fa-solid fa-trash-can mr-1.5"></i> Delete chat from archive
+                        </button>
+                    </section>
 
                     <!-- Shared media: the apps' Media / Voice / Files rows, opening the gallery on that tab -->
                     <section class="px-2 py-2 border-b border-tg-n700">
@@ -2575,6 +2591,34 @@
                     <button @click="runExport"
                         class="px-4 py-2 bg-tg-accent-strong hover:bg-tg-accent-hover text-tg-on-accent rounded-lg transition">
                         Export
+                    </button>
+                </div>
+            </section>
+        </div>
+
+        <!-- Delete Chat Confirmation Modal (master-only, irreversible) -->
+        <div v-if="deleteChatTarget"
+            class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center overflow-y-auto p-4"
+            @click.self="closeDeleteChatConfirm">
+            <section role="dialog" aria-modal="true" aria-labelledby="delete-chat-title"
+                class="my-auto bg-tg-sidebar rounded-2xl shadow-2xl p-6 w-full max-w-md border border-tg-n700">
+                <h3 id="delete-chat-title" class="text-xl font-bold text-tg-ink mb-2">Delete chat from archive?</h3>
+                <p class="text-sm text-tg-muted mb-2">
+                    This permanently removes <strong class="text-tg-ink">{{ getChatName(deleteChatTarget) }}</strong>
+                    and all of its messages, media and reactions from this archive. This cannot be undone.
+                </p>
+                <p class="text-sm text-tg-muted mb-4">
+                    If the chat still exists on Telegram, the next backup run will re-import it, same as any other chat currently in the account.
+                </p>
+                <p v-if="deleteChatError" class="mb-4 text-sm text-red-400">{{ deleteChatError }}</p>
+                <div class="flex gap-2 justify-end">
+                    <button @click="closeDeleteChatConfirm" :disabled="deletingChat"
+                        class="px-4 py-2 bg-tg-n700 hover:bg-tg-n600 text-tg-ink rounded-lg transition disabled:opacity-60">
+                        Cancel
+                    </button>
+                    <button @click="confirmDeleteChat" :disabled="deletingChat"
+                        class="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg transition disabled:opacity-60">
+                        {{ deletingChat ? 'Deleting…' : 'Permanently delete' }}
                     </button>
                 </div>
             </section>
@@ -3127,7 +3171,7 @@
     </div>
 
     <script>
-        const { createApp, ref, computed, onMounted, onUpdated, watch, nextTick } = Vue
+        const { createApp, ref, computed, onMounted, onUpdated, onUnmounted, watch, nextTick } = Vue
 
         createApp({
             setup() {
@@ -4848,9 +4892,19 @@
                     media_files: 0,
                     total_size_mb: 0,
                     stats_calculated_at: null,
-                    backup_in_progress: false
+                    backup_in_progress: false,
+                    backup_progress_current: 0,
+                    backup_progress_total: 0,
+                    backup_progress_heartbeat: null,
+                    backup_progress_activity: null
                 })
                 const statsPopupOpen = ref(false)
+                let statusPollTimer = null
+                const STATUS_POLL_MS = 15000
+                // Drives the "vor Xs aktiv" freshness readout below without waiting
+                // on the network poll: ticks every second, only while a backup runs.
+                const heartbeatNowTick = ref(Date.now())
+                let heartbeatTickTimer = null
 
                 // --- Color themes. A tiny script in <head> already set
                 // data-theme from localStorage/?theme= before first paint;
@@ -4898,6 +4952,90 @@
                 }
                 const showStatsUI = ref(true)  // Can be disabled via SHOW_STATS=false
 
+                // null while idle or before the backup engine has written a
+                // total yet (e.g. still fetching the dialog list) — the strip
+                // falls back to the plain "in progress" wording in that case.
+                const archiveBackupProgressPercent = computed(() => {
+                    const { backup_in_progress, backup_progress_current, backup_progress_total } = statsData.value
+                    if (!backup_in_progress || !backup_progress_total) return null
+                    return Math.min(100, Math.round((backup_progress_current / backup_progress_total) * 100))
+                })
+
+                const archiveStatusLabel = computed(() => {
+                    if (statsData.value.backup_in_progress) return 'Backup läuft'
+                    if (listenerActive.value) return 'Live-Synchronisierung aktiv'
+                    return 'Warte auf nächste Sicherung'
+                })
+
+                // Seconds since the last heartbeat write, using the local ticking
+                // clock so this counts up smoothly between 15s stats polls instead
+                // of jumping in steps.
+                const archiveHeartbeatAgeSeconds = computed(() => {
+                    const iso = statsData.value.backup_progress_heartbeat
+                    if (!iso) return null
+                    const then = new Date(iso.endsWith('Z') ? iso : iso + 'Z').getTime()
+                    if (Number.isNaN(then)) return null
+                    return Math.max(0, Math.round((heartbeatNowTick.value - then) / 1000))
+                })
+
+                const archiveStatusHint = computed(() => {
+                    if (statsData.value.backup_in_progress) {
+                        const percent = archiveBackupProgressPercent.value
+                        const chatsPart = percent === null
+                            ? 'Neue Chats und Medien werden verarbeitet'
+                            : `${statsData.value.backup_progress_current}/${statsData.value.backup_progress_total} Chats (${percent}%)`
+                        const activity = statsData.value.backup_progress_activity
+                        const ageSeconds = archiveHeartbeatAgeSeconds.value
+                        if (!activity || ageSeconds === null) return chatsPart
+                        // A stale heartbeat (no write in a while) is worth calling out
+                        // rather than silently showing an old "still working" message.
+                        const freshness = ageSeconds < 60 ? `vor ${ageSeconds}s` : `vor ${Math.round(ageSeconds / 60)}min`
+                        return `${chatsPart} · ${activity} (${freshness})`
+                    }
+                    return `Letzte Sicherung: ${formatLastBackupTime(lastBackupTime.value, viewerTimezone.value, lastBackupTimeSource.value)}`
+                })
+
+                const archiveStatusClass = computed(() => {
+                    if (statsData.value.backup_in_progress) return 'bg-amber-900/35 border-amber-700 text-amber-200'
+                    if (listenerActive.value) return 'bg-emerald-900/30 border-emerald-700 text-emerald-200'
+                    return 'bg-tg-n800/70 border-tg-n600 text-tg-n300'
+                })
+
+                const archiveStatusDotClass = computed(() => {
+                    if (statsData.value.backup_in_progress) return 'bg-amber-400 animate-pulse'
+                    if (listenerActive.value) return 'bg-emerald-400'
+                    return 'bg-tg-n500'
+                })
+
+                const stopStatusPolling = () => {
+                    if (statusPollTimer) {
+                        clearInterval(statusPollTimer)
+                        statusPollTimer = null
+                    }
+                }
+
+                const startStatusPolling = () => {
+                    stopStatusPolling()
+                    if (!isAuthenticated.value) return
+                    statusPollTimer = setInterval(async () => {
+                        await loadStats()
+                    }, STATUS_POLL_MS)
+                }
+
+                const stopHeartbeatTicker = () => {
+                    if (heartbeatTickTimer) {
+                        clearInterval(heartbeatTickTimer)
+                        heartbeatTickTimer = null
+                    }
+                }
+
+                const startHeartbeatTicker = () => {
+                    if (heartbeatTickTimer) return  // already ticking
+                    heartbeatTickTimer = setInterval(() => {
+                        heartbeatNowTick.value = Date.now()
+                    }, 1000)
+                }
+
                 const loadStats = async () => {
                     try {
                         const res = await fetch('/api/stats', {
@@ -4913,8 +5051,14 @@
                                 media_files: stats.media_files || 0,
                                 total_size_mb: stats.total_size_mb || 0,
                                 stats_calculated_at: stats.stats_calculated_at,
-                                backup_in_progress: stats.backup_in_progress || false
+                                backup_in_progress: stats.backup_in_progress || false,
+                                backup_progress_current: stats.backup_progress_current || 0,
+                                backup_progress_total: stats.backup_progress_total || 0,
+                                backup_progress_heartbeat: stats.backup_progress_heartbeat || null,
+                                backup_progress_activity: stats.backup_progress_activity || null
                             }
+                            if (stats.backup_in_progress) startHeartbeatTicker()
+                            else stopHeartbeatTicker()
 
                             // Show/hide stats UI based on config
                             showStatsUI.value = stats.show_stats !== false
@@ -5316,6 +5460,7 @@
                                 await loadFolders()
                                 await loadArchivedCount()
                                 setupInfiniteScroll()
+                                startStatusPolling()
 
                                 // Handle deep link from push notification. /?chat= carries the
                                 // chat's opaque ref, so the chat id stays out of browser history.
@@ -5849,6 +5994,7 @@
                             await loadArchivedCount()
                             setupInfiniteScroll()
                             await initNotifications()
+                            startStatusPolling()
                         } else {
                             loginError.value = 'Login failed'
                         }
@@ -5877,7 +6023,14 @@
                     userRole.value = ''
                     currentUsername.value = ''
                     showAdminPanel.value = false
+                    stopStatusPolling()
+                    stopHeartbeatTicker()
                 }
+
+                onUnmounted(() => {
+                    stopStatusPolling()
+                    stopHeartbeatTicker()
+                })
 
                 // Media Gallery methods (v7.10.0)
                 let mediaGalleryRequestSeq = 0
@@ -7269,6 +7422,55 @@
                     window.open(url, '_blank')
                 }
 
+                // Delete chat (master-only, irreversible) — a separate confirmation
+                // target rather than a boolean, so the modal keeps naming the chat
+                // even after the user later navigates elsewhere while it's still open.
+                const deleteChatTarget = ref(null)
+                const deletingChat = ref(false)
+                const deleteChatError = ref('')
+
+                const openDeleteChatConfirm = (chat) => {
+                    if (!chat) return
+                    deleteChatTarget.value = chat
+                    deleteChatError.value = ''
+                }
+
+                const closeDeleteChatConfirm = () => {
+                    if (deletingChat.value) return  // don't yank the dialog mid-request
+                    deleteChatTarget.value = null
+                    deleteChatError.value = ''
+                }
+
+                const confirmDeleteChat = async () => {
+                    const chat = deleteChatTarget.value
+                    if (!chat || deletingChat.value) return
+                    deletingChat.value = true
+                    deleteChatError.value = ''
+                    try {
+                        const res = await fetch(`/api/admin/chats/${encodeURIComponent(chat.ref)}`, {
+                            method: 'DELETE',
+                            credentials: 'include',
+                        })
+                        if (!res.ok) {
+                            const body = await res.json().catch(() => ({}))
+                            throw new Error(body.detail || `HTTP ${res.status}`)
+                        }
+                        deleteChatTarget.value = null
+                        closeInfoPanel()
+                        if (selectedChat.value?.ref === chat.ref) {
+                            selectedChat.value = null
+                            messages.value = []
+                            navStack.value = [{ type: 'chatList', filter: 'all' }]
+                        }
+                        await loadChats()
+                        showToast('Chat deleted')
+                    } catch (e) {
+                        deleteChatError.value = 'Could not delete this chat. Please try again.'
+                    } finally {
+                        deletingChat.value = false
+                    }
+                }
+
                 const getSenderRunKey = (msg) => {
                     // HTML imports can have no numeric sender ID, while snapshots
                     // can change across history. Group by both identity and the
@@ -7765,6 +7967,68 @@
                     const byMime = mime.startsWith('image/')
 
                     return byExtension || byMime
+                }
+
+                // ---- Sticker rendering ----
+                // Telegram ships stickers in three shapes: static WebP (plain
+                // image), video stickers (WebM, real video), and the default
+                // Lottie/.tgs ones — a gzipped JSON animation with no native
+                // browser decoder. Those three checks pick the branch the
+                // template renders; failures fall back to a plain label.
+                const isStaticSticker = (msg) => getDocumentDisplayName(msg).toLowerCase().endsWith('.webp')
+                const isVideoSticker = (msg) => getDocumentDisplayName(msg).toLowerCase().endsWith('.webm')
+                const isLottieSticker = (msg) => getDocumentDisplayName(msg).toLowerCase().endsWith('.tgs')
+
+                // messageIdKey, not msg.id: album/topic views can repeat a
+                // bare id across chats, and this key also has to match
+                // whatever onLottieStickerUnmounted looks the animation up by.
+                const lottieAnimations = new Map()  // messageIdKey -> lottie AnimationItem
+                const failedLottieStickers = ref(new Set())
+
+                const lottieStickerFailed = (msg) => failedLottieStickers.value.has(messageIdKey(msg))
+
+                const markLottieStickerFailed = (key) => {
+                    failedLottieStickers.value = new Set([...failedLottieStickers.value, key])
+                }
+
+                // .tgs is gzip; DecompressionStream is the native inflater so no
+                // separate pako/zlib vendor file is needed alongside lottie-light.
+                const onLottieStickerMounted = async (el, msg) => {
+                    const key = messageIdKey(msg)
+                    if (typeof window.lottie === 'undefined' || typeof DecompressionStream === 'undefined') {
+                        markLottieStickerFailed(key)
+                        return
+                    }
+                    try {
+                        const res = await fetch(getMediaUrl(msg), { credentials: 'same-origin' })
+                        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+                        const decompressed = res.body.pipeThrough(new DecompressionStream('gzip'))
+                        const animationData = JSON.parse(await new Response(decompressed).text())
+                        // The await above can outlive the bubble (fast scroll, chat switch):
+                        // an element no longer in the document must not get an animation
+                        // nothing will ever destroy().
+                        if (!el.isConnected) return
+                        const anim = window.lottie.loadAnimation({
+                            container: el,
+                            renderer: 'svg',
+                            loop: true,
+                            autoplay: true,
+                            animationData,
+                        })
+                        lottieAnimations.set(key, anim)
+                    } catch (e) {
+                        console.error('Failed to render sticker animation:', e)
+                        markLottieStickerFailed(key)
+                    }
+                }
+
+                const onLottieStickerUnmounted = (msg) => {
+                    const key = messageIdKey(msg)
+                    const anim = lottieAnimations.get(key)
+                    if (anim) {
+                        anim.destroy()
+                        lottieAnimations.delete(key)
+                    }
                 }
 
                 const handleImageError = (event, msg) => {
@@ -9591,6 +9855,13 @@
                     getMediaDisplayName,
                     getDocumentDisplayName,
                     isImageDocument,
+                    // Stickers
+                    isStaticSticker,
+                    isVideoSticker,
+                    isLottieSticker,
+                    lottieStickerFailed,
+                    onLottieStickerMounted,
+                    onLottieStickerUnmounted,
                     handleImageError,
                     handleMediaError,
                     openMedia,
@@ -9695,6 +9966,12 @@
                     showExportModal,
                     exportFromDate,
                     exportToDate,
+                    deleteChatTarget,
+                    deletingChat,
+                    deleteChatError,
+                    openDeleteChatConfirm,
+                    closeDeleteChatConfirm,
+                    confirmDeleteChat,
                     // Error states
                     chatsError,
                     loadChats,
@@ -9718,6 +9995,12 @@
                     statsData,
                     statsPopupOpen,
                     showStatsUI,
+                    archiveStatusLabel,
+                    archiveStatusHint,
+                    archiveStatusClass,
+                    archiveStatusDotClass,
+                    archiveBackupProgressPercent,
+                    archiveHeartbeatAgeSeconds,
                     formatStatsTime,
                     formatNumber,
                     formatSize,
