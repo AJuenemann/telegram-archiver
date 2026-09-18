@@ -2017,7 +2017,7 @@
                                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                                         d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                                                 </svg>
-                                                <span>Media not found</span>
+                                                <span>{{ getMediaFailureLabel(msg) }}</span>
                                                 <button @click.stop="retryMediaLoad(msg)"
                                                     class="ml-2 text-xs text-tg-accent-soft hover:text-tg-accent-bright underline">
                                                     Retry
@@ -2052,7 +2052,7 @@
                                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                                         d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                                                 </svg>
-                                                <span>Media not found</span>
+                                                <span>{{ getMediaFailureLabel(msg) }}</span>
                                                 <button @click.stop="retryMediaLoad(msg)"
                                                     class="ml-2 text-xs text-tg-accent-soft hover:text-tg-accent-bright underline">
                                                     Retry
@@ -2094,7 +2094,7 @@
                                                 </button>
                                             </div>
                                             <video v-else-if="isVideoSticker(msg)"
-                                                :src="getAnimatedStickerFallbackUrl(msg)"
+                                                :src="getStickerPlaybackUrl(msg)"
                                                 class="max-h-48 max-w-full object-contain"
                                                 autoplay loop muted playsinline
                                                 @loadeddata="handleMediaLoaded(msg)"
@@ -2169,7 +2169,7 @@
                                         <img v-if="msg.media?.type === 'webpage' && msg.media?.file_path"
                                             :src="getMediaUrl(msg)" loading="lazy" alt=""
                                             class="mt-1 rounded max-h-48 max-w-full object-cover"
-                                            @error="handleImageError($event, msg)">
+                                            @error="handleWebpagePreviewError($event, msg)">
                                     </div>
 
                                     <!-- Reactions -->
@@ -5940,20 +5940,41 @@
                         gifObserver.disconnect()
                     }
 
-                    gifObserver = new IntersectionObserver((entries) => {
-                        entries.forEach(entry => {
-                            const video = entry.target
-                            if (entry.isIntersecting) {
-                                // Load and play when visible
+                    const MAX_ACTIVE_INLINE_VIDEOS = 6
+                    const updateVisibleInlineVideos = () => {
+                        const candidates = Array.from(document.querySelectorAll('.gif-video')).filter((video) => {
+                            if (!(video instanceof HTMLVideoElement) || !video.isConnected) return false
+                            const rect = video.getBoundingClientRect()
+                            return rect.bottom > 0 && rect.top < window.innerHeight
+                        })
+
+                        candidates.sort((a, b) => {
+                            const da = Math.abs(a.getBoundingClientRect().top)
+                            const db = Math.abs(b.getBoundingClientRect().top)
+                            return da - db
+                        })
+
+                        const keep = new Set(candidates.slice(0, MAX_ACTIVE_INLINE_VIDEOS))
+                        candidates.forEach((video) => {
+                            if (keep.has(video)) {
                                 if (!video.src && video.dataset.src) {
                                     video.src = video.dataset.src
                                 }
                                 video.play().catch(() => { })
                             } else {
-                                // Pause when not visible
                                 video.pause()
                             }
                         })
+                    }
+
+                    gifObserver = new IntersectionObserver((entries) => {
+                        entries.forEach(entry => {
+                            const video = entry.target
+                            if (!entry.isIntersecting && video instanceof HTMLVideoElement) {
+                                video.pause()
+                            }
+                        })
+                        updateVisibleInlineVideos()
                     }, { threshold: 0.1 })
                 }
 
@@ -6711,6 +6732,11 @@
                         // below mutates the live view.
                         if (chatVersion !== myVersion || messageSearchQuery.value) return
 
+                        // If polling succeeds again after transient network failures,
+                        // let media rows leave their error state and try loading again.
+                        mediaRetryPausedUntil = 0
+                        recoverTransientMediaFailures()
+
                         // NOTE: keep everything from here to the mutations synchronous (no await)
                         // — it must operate on one consistent messages.value snapshot.
                         const latestIds = new Set(latestMessages.map(messageIdKey).filter(Boolean))
@@ -6768,6 +6794,7 @@
                             }
                         }
                     } catch (e) {
+                        pauseMediaRetriesTemporarily()
                         console.warn('[Auto-refresh] Error checking for messages:', e)
                     } finally {
                         isRefreshing = false
@@ -8012,10 +8039,22 @@
                 const isVideoSticker = (msg) => stickerFileName(msg).endsWith('.webm') || stickerMime(msg).startsWith('video/')
                 const isLottieSticker = (msg) => stickerFileName(msg).endsWith('.tgs') || stickerMime(msg).includes('tgsticker')
 
-                const MAX_MEDIA_RETRIES = 2
+                const MAX_MEDIA_RETRIES = 3
+                const MEDIA_RETRY_PAUSE_MS = 6000
                 const mediaRetryState = new Map() // messageIdKey -> retry attempts
                 const mediaRetryTimers = new Map() // messageIdKey -> timeout id
+                let mediaRetryPausedUntil = 0
                 const mediaRetryKey = (msg) => messageIdKey(msg)
+
+                const pauseMediaRetriesTemporarily = () => {
+                    mediaRetryPausedUntil = Date.now() + MEDIA_RETRY_PAUSE_MS
+                }
+
+                const isInViewport = (el) => {
+                    if (!el || typeof el.getBoundingClientRect !== 'function') return false
+                    const rect = el.getBoundingClientRect()
+                    return rect.bottom > 0 && rect.top < window.innerHeight
+                }
 
                 const bumpMediaRetry = (msg) => {
                     const key = mediaRetryKey(msg)
@@ -8040,20 +8079,53 @@
                     return `${url}${sep}_retry=${Date.now()}`
                 }
 
+                const stripRetryParam = (url) => {
+                    if (!url) return ''
+                    return url
+                        .replace(/([?&])_retry=[^&]*/g, '$1')
+                        .replace(/[?&]$/, '')
+                        .replace('?&', '?')
+                }
+
                 const retryMediaElementLoad = (mediaEl, msg, url) => {
-                    const attempt = bumpMediaRetry(msg)
-                    if (attempt > MAX_MEDIA_RETRIES || !url) {
+                    if (!url || !mediaEl?.isConnected) {
                         return false
                     }
-                    const delayMs = attempt * 300
+
+                    if (mediaEl.classList?.contains('gif-video') && !isInViewport(mediaEl)) {
+                        // Offscreen inline media should wait for the observer to reactivate it.
+                        msg.mediaLoadFailed = false
+                        return true
+                    }
+
                     const key = mediaRetryKey(msg)
                     const previousTimer = mediaRetryTimers.get(key)
                     if (previousTimer) {
                         window.clearTimeout(previousTimer)
                     }
+
+                    const now = Date.now()
+                    if (now < mediaRetryPausedUntil) {
+                        const timerId = window.setTimeout(() => {
+                            mediaRetryTimers.delete(key)
+                            if (!mediaEl?.isConnected) return
+                            msg.mediaLoadFailed = false
+                            mediaEl.src = withRetryParam(url)
+                            if (typeof mediaEl.load === 'function') mediaEl.load()
+                        }, Math.max(120, mediaRetryPausedUntil - now))
+                        mediaRetryTimers.set(key, timerId)
+                        return true
+                    }
+
+                    const attempt = bumpMediaRetry(msg)
+                    if (attempt > MAX_MEDIA_RETRIES) {
+                        return false
+                    }
+                    const delayMs = attempt * 450
                     const timerId = window.setTimeout(() => {
                         mediaRetryTimers.delete(key)
                         if (!mediaEl?.isConnected) return
+                        msg.mediaLoadFailed = false
                         mediaEl.src = withRetryParam(url)
                         if (typeof mediaEl.load === 'function') mediaEl.load()
                     }, delayMs)
@@ -8063,12 +8135,31 @@
 
                 const handleMediaLoaded = (msg) => {
                     msg.mediaLoadFailed = false
+                    msg.mediaLoadErrorKind = ''
                     clearMediaRetry(msg)
                 }
 
                 const retryMediaLoad = (msg) => {
                     msg.mediaLoadFailed = false
+                    msg.mediaLoadErrorKind = ''
+                    msg.useAnimatedStickerFallback = false
                     clearMediaRetry(msg)
+                }
+
+                const recoverTransientMediaFailures = () => {
+                    for (const msg of messages.value) {
+                        if (!msg?.mediaLoadFailed) continue
+                        if (msg.mediaLoadErrorKind === 'missing') continue
+                        msg.mediaLoadFailed = false
+                        msg.mediaLoadErrorKind = ''
+                        clearMediaRetry(msg)
+                    }
+                }
+
+                const getMediaFailureLabel = (msg) => {
+                    return msg?.mediaLoadErrorKind === 'missing'
+                        ? 'Media not found'
+                        : 'Media temporarily unavailable'
                 }
 
                 const getStickerPreviewUrl = (msg) => {
@@ -8084,6 +8175,21 @@
                         return ''
                     }
                     return `/media/sticker-animated/${selectedChat.value.ref}/${encodeURIComponent(msg.media.id)}`
+                }
+
+                const getStickerPlaybackUrl = (msg) => {
+                    if (msg?.useAnimatedStickerFallback) {
+                        return getAnimatedStickerFallbackUrl(msg)
+                    }
+                    return getMediaUrl(msg)
+                }
+
+                const classifyMediaFailure = (msg) => {
+                    if (msg?.media?.downloaded === false) {
+                        msg.mediaLoadErrorKind = 'missing'
+                        return
+                    }
+                    msg.mediaLoadErrorKind = 'transient'
                 }
 
                 const retryLottieSticker = (msg) => {
@@ -8164,8 +8270,18 @@
                     // <type> — the message id is PII, and the console buffer travels in
                     // screenshots, screen shares and browser bug reports.
                     console.error('Failed to load image')
+                    const img = event?.target
+                    if (!img) return
+
+                    const currentSrc = img.getAttribute('src') || ''
+                    if (!currentSrc.startsWith('data:image/svg+xml')) {
+                        const retryUrl = stripRetryParam(currentSrc)
+                        if (retryUrl && retryMediaElementLoad(img, msg, retryUrl)) {
+                            return
+                        }
+                    }
+
                     // Show placeholder instead of broken image
-                    const img = event.target
                     img.onerror = null  // Prevent infinite loop
                     img.src = 'data:image/svg+xml,' + encodeURIComponent(`
                         <svg xmlns="http://www.w3.org/2000/svg" width="200" height="150" viewBox="0 0 200 150">
@@ -8178,13 +8294,37 @@
                     img.onclick = null
                 }
 
+                const handleWebpagePreviewError = (event, msg) => {
+                    console.error('Failed to load webpage preview image')
+                    const img = event?.target
+                    if (!img) return
+
+                    const currentSrc = img.getAttribute('src') || ''
+                    const mediaUrl = getMediaUrl(msg)
+                    const retryUrl = stripRetryParam(mediaUrl || currentSrc)
+                    if (retryUrl && retryMediaElementLoad(img, msg, retryUrl)) {
+                        return
+                    }
+
+                    // Keep the webpage card text/link visible even when the preview image fails.
+                    img.style.display = 'none'
+                }
+
                 const handleMediaError = (event, msg) => {
                     // Same rule as handleImageError: the media URL carries the message id,
                     // so log the event only.
                     console.error('Failed to load media')
                     const mediaEl = event?.target
                     const url = getMediaUrl(msg)
-                    if (mediaEl && retryMediaElementLoad(mediaEl, msg, url)) {
+                    const mediaType = msg?.media?.type || ''
+                    const errCode = mediaEl?.error?.code
+
+                    if (errCode === 1 || !mediaEl?.isConnected) {
+                        return
+                    }
+
+                    const allowAutoRetry = mediaType === 'video' || mediaType === 'video_note' || mediaType === 'sticker'
+                    if (allowAutoRetry && mediaEl && retryMediaElementLoad(mediaEl, msg, url)) {
                         return
                     }
                     // Flag the row and let the template swap in the placeholder. Writing
@@ -8192,16 +8332,27 @@
                     // and the play overlay that Vue still held vnode.el pointers to, so the
                     // bubble stayed detached from the render tree for the rest of its life.
                     msg.mediaLoadFailed = true
+                    classifyMediaFailure(msg)
                 }
 
                 const handleStickerVideoError = (event, msg) => {
                     console.error('Failed to load sticker animation')
                     const mediaEl = event?.target
-                    const url = getAnimatedStickerFallbackUrl(msg)
+                    if (!msg.useAnimatedStickerFallback) {
+                        msg.useAnimatedStickerFallback = true
+                        const fallbackUrl = getAnimatedStickerFallbackUrl(msg)
+                        if (mediaEl && fallbackUrl) {
+                            mediaEl.src = withRetryParam(fallbackUrl)
+                            if (typeof mediaEl.load === 'function') mediaEl.load()
+                            return
+                        }
+                    }
+                    const url = getStickerPlaybackUrl(msg)
                     if (mediaEl && retryMediaElementLoad(mediaEl, msg, url)) {
                         return
                     }
                     msg.mediaLoadFailed = true
+                    classifyMediaFailure(msg)
                 }
 
                 const openMedia = (msg) => {
@@ -10008,10 +10159,13 @@
                     retryLottieSticker,
                     handleMediaLoaded,
                     retryMediaLoad,
+                    getMediaFailureLabel,
                     getStickerPreviewUrl,
                     getAnimatedStickerFallbackUrl,
+                    getStickerPlaybackUrl,
                     handleStickerVideoError,
                     handleImageError,
+                    handleWebpagePreviewError,
                     handleMediaError,
                     openMedia,
                     // Lightbox
