@@ -2074,7 +2074,8 @@
                                                 @error="handleImageError($event, msg)">
                                             <video v-else-if="isVideoSticker(msg)"
                                                 :src="getMediaUrl(msg)"
-                                                class="max-h-48 max-w-full object-contain"
+                                                class="h-48 w-48 max-w-full object-contain"
+                                                preload="auto"
                                                 autoplay loop muted playsinline
                                                 @error="handleMediaError($event, msg)"></video>
                                             <div v-else-if="isLottieSticker(msg) && !lottieStickerFailed(msg)"
