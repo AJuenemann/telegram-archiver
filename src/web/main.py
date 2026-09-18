@@ -2552,6 +2552,15 @@ def _attach_message_payload_urls(messages: list, chat: ChatContext) -> None:
             media["url"] = f"/media/{chat.ref}/{_encode_media_key(media_key)}"
         else:
             media["url"] = None
+        # Poster frame for the bubble's <video>: without it the browser shows
+        # nothing until playback starts (no built-in "first frame" preview for
+        # preload="metadata"), so a video message renders as a blank rectangle
+        # with just the play button. Reuses the same on-demand thumbnail route
+        # the media gallery already serves from (ffmpeg-generated, cached).
+        if media.get("type") in ("video", "video_note") and media["url"]:
+            media["thumb_url"] = f"/media/thumb/400/{chat.ref}/{_encode_media_key(media_key)}"
+        else:
+            media["thumb_url"] = None
 
 
 @app.get("/api/chats")

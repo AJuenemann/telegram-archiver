@@ -2020,7 +2020,7 @@
                                                 <span>Media not found</span>
                                             </div>
                                             <video v-else
-                                                :data-src="getMediaUrl(msg)"
+                                                :data-src="getMediaUrl(msg)" :poster="msg.media?.thumb_url"
                                                 class="round-video gif-video cursor-pointer"
                                                 loop muted playsinline
                                                 tabindex="0" role="button"
@@ -2050,7 +2050,7 @@
                                                 <span>Media not found</span>
                                             </div>
                                             <template v-else>
-                                                <video preload="metadata"
+                                                <video preload="metadata" :poster="msg.media?.thumb_url"
                                                     class="rounded-lg max-h-64 w-full pointer-events-none"
                                                     @error="handleMediaError($event, msg)">
                                                     <source :src="getMediaUrl(msg)" type="video/mp4">
