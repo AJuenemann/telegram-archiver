@@ -31,7 +31,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import DBAPIError, OperationalError
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -649,6 +649,21 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def add_application_path(request: Request, call_next):
+    """Expose the viewer below a stable, descriptive URL path."""
+    application_path = "/telegram-archive"
+    request_path = request.scope["path"]
+
+    if request_path == "/":
+        return RedirectResponse(f"{application_path}/", status_code=307)
+
+    if request_path == application_path or request_path.startswith(f"{application_path}/"):
+        request.scope["path"] = request_path[len(application_path) :] or "/"
+
+    return await call_next(request)
 
 
 @app.middleware("http")
