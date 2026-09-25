@@ -457,6 +457,8 @@ class TestEventHandlers:
         assert listener.stats["new_messages_saved"] == 1
         listener.db.insert_message.assert_called_once()
         listener.db.upsert_chat.assert_called_once()
+        listener.db.set_metadata.assert_awaited_once()
+        assert listener.db.set_metadata.await_args.args[0] == "last_backup_time"
 
     def test_on_new_message_captures_forward_origin(self, listener_with_handlers, full_config):
         """A forwarded channel post stores the origin pointer in raw_data."""

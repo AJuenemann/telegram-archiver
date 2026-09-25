@@ -470,6 +470,13 @@ class TelegramListener:
 
         logger.info("Event handlers registered")
 
+    async def _touch_last_backup_time(self) -> None:
+        """Record the latest successful live capture for the viewer status."""
+        try:
+            await self.db.set_metadata("last_backup_time", utcnow_naive().isoformat() + "Z")
+        except Exception:
+            logger.warning("Could not update last backup time after live capture")
+
     async def _load_tracked_chats(self) -> None:
         """Load list of chat IDs we're backing up (to filter events)."""
         try:
@@ -1350,6 +1357,7 @@ class TelegramListener:
                 # Insert the message FIRST (required for FK constraint on media table)
                 await self.db.insert_message(message_data, account_id=self.account_id)
                 self.stats["new_messages_saved"] += 1
+                await self._touch_last_backup_time()
 
                 # New messages can arrive already carrying reactions (fast reactors,
                 # forwarded content). Buffer them now that the row exists (#221).
@@ -1584,6 +1592,7 @@ class TelegramListener:
                     message_data["raw_data"]["new_title"] = event.new_title
 
                 await self.db.insert_message(message_data, account_id=self.account_id)
+                await self._touch_last_backup_time()
                 logger.info("📌 Service message saved")
 
                 # Refresh cached chat metadata on a photo or title change. A photo
