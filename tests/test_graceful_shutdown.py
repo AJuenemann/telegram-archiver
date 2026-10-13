@@ -109,7 +109,20 @@ class TestOpsWiring:
         real-time updates silently degrade to refresh-to-see."""
         compose = (REPO / "docker-compose.yml").read_text()
         assert "VIEWER_HOST: ${VIEWER_HOST:-telegram-viewer}" in compose
-        assert "VIEWER_PORT: ${VIEWER_PORT:-8000}" in compose
+        assert 'VIEWER_PORT: "8000"' in compose
+
+    def test_compose_separates_published_port_from_realtime_push_port(self):
+        compose = (REPO / "docker-compose.yml").read_text()
+        assert '"127.0.0.1:${VIEWER_HOST_PORT:-8081}:8000"' in compose
+        assert "${VIEWER_PORT" not in compose
+
+    def test_host_port_is_documented_in_readme_and_env_example(self):
+        readme = (REPO / "README.md").read_text()
+        env_example = (REPO / ".env.example").read_text()
+        assert "| `VIEWER_HOST_PORT` | `8081` |" in readme
+        assert "VIEWER_HOST_PORT=8082" in readme
+        assert "docker compose up -d --force-recreate telegram-viewer" in readme
+        assert "# VIEWER_HOST_PORT=8081" in env_example
 
     def test_run_forever_registers_loop_signal_handlers(self):
         src = (REPO / "src" / "scheduler.py").read_text()
