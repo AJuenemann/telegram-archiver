@@ -161,7 +161,8 @@ services:
       # every push is refused and "real-time updates" silently degrades to
       # refresh-to-see on the stock SQLite stack.
       VIEWER_HOST: ${VIEWER_HOST:-telegram-viewer}
-      VIEWER_PORT: ${VIEWER_PORT:-8000}
+      # The published host port must not change the internal push target.
+      VIEWER_PORT: "8000"
 
       # Logging
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -217,7 +218,7 @@ services:
     ports:
       # Bind to localhost by default. Put this behind a reverse proxy with auth
       # configured before exposing it publicly.
-      - "127.0.0.1:${VIEWER_PORT:-8000}:8000"
+      - "127.0.0.1:${VIEWER_HOST_PORT:-8081}:8000"
 
     # DELIBERATE ASYMMETRY with telegram-backup: no env_file here. This is the
     # internet-facing container, so it receives an explicit allowlist instead

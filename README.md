@@ -186,7 +186,7 @@ docker compose restart telegram-backup
 docker compose up -d
 ```
 
-**View your backup** at http://localhost:8000
+**View your backup** at http://localhost:8081 (or the port set by `VIEWER_HOST_PORT`).
 
 The default compose binds the viewer to `127.0.0.1`. Put it behind a reverse proxy only after setting `VIEWER_USERNAME` and `VIEWER_PASSWORD`. To deliberately run without auth for a local-only viewer, set `ALLOW_ANONYMOUS_VIEWER=true` — this grants read-only access only; writes still require the master account.
 
@@ -198,6 +198,47 @@ The default compose binds the viewer to `127.0.0.1`. Put it behind a reverse pro
 | `init_auth.sh: command not found` | Run `chmod +x init_auth.sh` first |
 | Viewer shows no data | Both containers need same database path - see [Database Configuration](#database-configuration) |
 | `Failed to authorize` | Re-run `./init_auth.sh` |
+| `port is already allocated` | Choose a free `VIEWER_HOST_PORT` and recreate the viewer; see [Viewer port configuration](#viewer-port-configuration) |
+
+### Viewer port configuration
+
+The shipped Compose stack publishes `127.0.0.1:${VIEWER_HOST_PORT:-8081}:8000`.
+`VIEWER_HOST_PORT` controls only the browser/reverse-proxy port on the host.
+The viewer always listens on port `8000` inside its container, and the backup
+container connects to `telegram-viewer:8000` for realtime updates.
+
+If the host port is occupied, choose a free one in `.env`, for example:
+
+```dotenv
+VIEWER_HOST_PORT=8082
+```
+
+Apply the change by recreating the viewer:
+
+```bash
+docker compose up -d --force-recreate telegram-viewer
+docker compose ps telegram-viewer
+```
+
+The `PORTS` column should show `127.0.0.1:8082->8000/tcp`. Open
+http://localhost:8082 from the Docker host, or update your reverse proxy's upstream.
+A simple `docker compose restart` does not apply port changes. The localhost
+binding intentionally prevents direct access from other devices; use a suitably
+authenticated reverse proxy or an SSH tunnel for remote access.
+
+**Upgrading an existing deployment:** `VIEWER_PORT` no longer controls the
+published Compose port. To retain an old host port, set `VIEWER_HOST_PORT` to that
+value, provided it is free. Old `VIEWER_PORT` values (such as `8080`) cannot
+override the new mapping or the backup container's internal port. Recreate
+`telegram-backup` as well to apply the corrected internal target if it was
+previously configured with the wrong port:
+
+```bash
+docker compose up -d --force-recreate telegram-backup
+```
+
+Outside the shipped Compose stack, `VIEWER_PORT` still configures the backup's
+realtime push destination.
 
 ## Web Viewer
 
@@ -360,7 +401,8 @@ The **Scope** column shows whether each variable applies to the backup scheduler
 | `TRUST_PROXY_HEADERS` | `false` | V | Trust `X-Forwarded-For` / `X-Real-IP` only when your reverse proxy overwrites them |
 | `INTERNAL_PUSH_SECRET` | - | B/V | Shared secret for SQLite backup-to-viewer realtime push over Docker/private networks |
 | `VIEWER_HOST` | `localhost` | B | Viewer host for SQLite realtime push from backup/listener. The `localhost` default only fits a same-host (bare-metal) setup; the shipped compose overrides it to the `telegram-viewer` service |
-| `VIEWER_PORT` | `8080` | B | Viewer port for SQLite realtime push from backup/listener. The shipped compose overrides it to `8000`, the viewer container's port |
+| `VIEWER_PORT` | `8080` | B | Viewer port for SQLite realtime push outside the shipped Compose stack. Compose fixes it to `8000` inside the backup container, regardless of `.env` |
+| `VIEWER_HOST_PORT` | `8081` | V | Shipped Compose only: published localhost port for browser/reverse-proxy access. Independent of the fixed container port `8000` |
 | `VIEWER_TIMEZONE` | `Europe/Madrid` | V | Timezone for displayed timestamps ([tz database names](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)) |
 | `VIEWER_DEFAULT_THEME` | *(unset — Slate)* | V | Default color theme for browsers with no saved choice: `slate`, `night`, `amoled`, `forest`, `aubergine`, `day`, `paper`. The in-app picker overrides it per browser |
 | `VIEWER_CHAT_BACKGROUND` | *(unset — none)* | V | Wallpaper behind the messages: a file name the viewer serves from `/static`, so mount the image into the container (`- ./wallpaper.jpg:/app/src/web/static/wallpaper.jpg:ro`). Bubbles turn opaque and the image is tinted with the palette's own background, so one picture suits a light and a dark theme |
